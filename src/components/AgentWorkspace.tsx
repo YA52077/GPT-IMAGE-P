@@ -9,7 +9,7 @@ import { downloadImageEntriesAsZip, downloadImageIds, getImageZipEntries } from 
 import TaskCard from './TaskCard'
 import MarkdownRenderer from './MarkdownRenderer'
 import { TooltipButton as AgentActionButton } from './TooltipButton'
-import { TrashIcon, DownloadIcon, EditIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, SidebarLeftIcon, FavoriteIcon, CloseIcon, CopyIcon, RefreshIcon, ArrowDownIcon } from './icons'
+import { TrashIcon, DownloadIcon, EditIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, SidebarLeftIcon, FavoriteIcon, CloseIcon, CopyIcon, RefreshIcon, ArrowDownIcon, UserAvatarIcon, BotAvatarIcon } from './icons'
 
 function ChatImageThumb({ imageId, imageIndex, maskImageId }: { imageId: string; imageIndex: number; maskImageId?: string | null }) {
   const [src, setSrc] = useState<string>(() => getCachedImage(imageId) || '')
@@ -74,9 +74,40 @@ function AgentStreamingCursor() {
 }
 
 const AGENT_STOPPED_MESSAGE = '已停止生成。'
+const USER_AVATAR_SRC = `${import.meta.env.BASE_URL}avatars/user.jpg`
+const ASSISTANT_AVATAR_SRC = `${import.meta.env.BASE_URL}avatars/agent.svg`
 
 function formatTime(value: number) {
   return new Date(value).toLocaleString()
+}
+
+function ChatHeaderAvatar({ isAssistant }: { isAssistant: boolean }) {
+  const [failed, setFailed] = useState(false)
+  const src = isAssistant ? ASSISTANT_AVATAR_SRC : USER_AVATAR_SRC
+  const label = isAssistant ? '贾维斯头像' : 'Gɪᴠᴇ ᴜᴘ.头像'
+
+  useEffect(() => {
+    setFailed(false)
+  }, [src])
+
+  return (
+    <span className={`flex h-6 w-6 items-center justify-center overflow-hidden rounded-full ${
+      isAssistant
+        ? 'text-blue-600 dark:text-blue-400'
+        : 'text-gray-600 dark:text-gray-300'
+    }`}>
+      {failed ? (
+        isAssistant ? <BotAvatarIcon className="h-5 w-5" /> : <UserAvatarIcon className="h-5 w-5" />
+      ) : (
+        <img
+          src={src}
+          alt={label}
+          className="h-full w-full rounded-full object-cover"
+          onError={() => setFailed(true)}
+        />
+      )}
+    </span>
+  )
 }
 
 function AgentWebSearchInlineStatus({ status }: { status: AgentWebSearchStatus }) {
@@ -569,7 +600,7 @@ export default function AgentWorkspace() {
 
     setConfirmDialog({
       title: '删除对话',
-      message: '确定要删除这个 Agent 对话吗？',
+      message: '确定要删除本次的贾维斯对话吗？',
       checkbox: generatedImageCount > 0
         ? {
             label: `同时删除对话中生成的图片（${generatedImageCount} 张）`,
@@ -729,7 +760,7 @@ export default function AgentWorkspace() {
   const handleReuse = (task: TaskRecord) => {
     setConfirmDialog({
       title: '切换到画廊模式？',
-      message: '复用参数会应用到画廊输入区。切换到画廊模式后，当前 Agent 对话仍会保留。',
+      message: '复用参数会应用到画廊输入区。切换到画廊模式后，当前和贾维斯的对话仍会保留。',
       confirmText: '切换并复用',
       cancelText: '取消',
       action: () => {
@@ -928,7 +959,7 @@ export default function AgentWorkspace() {
               }}
               className="text-sm font-semibold text-gray-700 dark:text-gray-300 truncate flex-1 text-center px-2 hover:bg-gray-100 dark:hover:bg-white/[0.04] rounded transition-colors"
             >
-              {conversation?.title || 'Agent'}
+              {conversation?.title || '贾维斯'}
             </button>
             <button type="button" onClick={createConversation} className="p-2 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/[0.04] rounded-lg transition-colors" title="新对话">
               <EditIcon className="w-5 h-5" />
@@ -945,7 +976,7 @@ export default function AgentWorkspace() {
         >
           {!conversation ? (
             <div className="py-20 text-center text-gray-400">
-              <p className="mb-3">还没有 Agent 对话</p>
+              <p className="mb-3">还没有和贾维斯对话</p>
               <button type="button" onClick={createConversation} className="rounded-lg bg-blue-500 px-4 py-2 text-white hover:bg-blue-600 transition-colors">创建对话</button>
             </div>
           ) : (
@@ -953,7 +984,7 @@ export default function AgentWorkspace() {
               if (activeMessages.length === 0) {
                 return (
                   <div className="py-20 text-center text-gray-400">
-                    <p className="mb-2">开始新的 Agent 对话</p>
+                    <p className="mb-2">开始新的贾维斯对话</p>
                     <p className="text-xs">在底部输入框发送消息即可创建第一轮对话。</p>
                   </div>
                 )
@@ -992,8 +1023,10 @@ export default function AgentWorkspace() {
                       }`}
                       >
                     <div className="mb-2 flex items-center justify-between gap-4 text-sm text-gray-500 dark:text-gray-400">
-                      <span className="font-medium">
-                         <span className={isAssistant ? 'text-blue-600 dark:text-blue-400 font-semibold' : 'text-gray-700 dark:text-gray-200 font-semibold'}>{isAssistant ? 'Agent' : '用户'}</span> <span className="opacity-60 font-normal ml-1">· 第 {round?.index ?? '?'} 轮</span>
+                      <span className="flex items-center gap-2 font-medium">
+                        <ChatHeaderAvatar isAssistant={isAssistant} />
+                        <span className={isAssistant ? 'text-blue-600 dark:text-blue-400 font-semibold' : 'text-gray-700 dark:text-gray-200 font-semibold'}>{isAssistant ? '贾维斯' : 'Gɪᴠᴇ ᴜᴘ.'}</span>
+                        {/* <span className="opacity-60 font-normal">· 第 {round?.index ?? '?'} 轮</span> */}
                       </span>
                     </div>
                     
@@ -1209,7 +1242,11 @@ export default function AgentWorkspace() {
                     <div key={`running-${round.id}`} className="flex w-full justify-start mb-6">
                       <article className="flex min-w-[16rem] max-w-[95%] flex-col rounded-2xl rounded-tl-sm border border-gray-200 bg-white/70 p-4 dark:border-white/[0.08] dark:bg-white/[0.03] md:max-w-[85%] lg:max-w-[75%]">
                         <div className="mb-2 text-sm text-gray-500 dark:text-gray-400">
-                          <span className="text-blue-600 dark:text-blue-400 font-semibold">Agent</span> <span className="ml-1 font-normal opacity-60">· 第 {round.index} 轮</span>
+                          <span className="flex items-center gap-2 font-medium">
+                            <ChatHeaderAvatar isAssistant />
+                            <span className="text-blue-600 dark:text-blue-400 font-semibold">贾维斯</span>
+                            <span className="font-normal opacity-60">· 第 {round.index} 轮</span>
+                          </span>
                         </div>
                         <div className="flex items-center gap-3 text-sm text-gray-500 dark:text-gray-400">
                           <span className="inline-flex items-center gap-1.5">

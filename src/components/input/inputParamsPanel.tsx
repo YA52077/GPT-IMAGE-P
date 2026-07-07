@@ -179,8 +179,8 @@ export default function InputParamsPanel({
               setParams({ transparent_output: val === 'on', output_compression: null })
             }}
             options={[
-              { label: 'false', value: 'off' },
-              { label: 'true', value: 'on' },
+              { label: '关闭', value: 'off' },
+              { label: '开启', value: 'on' },
             ]}
             className={selectClass}
             onOpenChange={onTransparentOutputMenuOpenChange}
@@ -238,8 +238,8 @@ export default function InputParamsPanel({
             if (!moderationDisabled) setParams({ moderation: val as TaskParams['moderation'] })
           }}
           options={[
-            { label: 'auto', value: 'auto' },
-            { label: 'low', value: 'low' },
+            { label: '自动', value: 'auto' },
+            { label: '低', value: 'low' },
           ]}
           disabled={moderationDisabled}
           className={moderationDisabled

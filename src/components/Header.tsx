@@ -248,7 +248,7 @@ export default function Header() {
               onClick={() => setAppMode('agent')}
               className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'agent' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
             >
-              代理
+              智能体
             </button>
           </div>
           <div className="flex items-center gap-1 shrink-0">

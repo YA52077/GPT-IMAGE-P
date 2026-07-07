@@ -217,3 +217,26 @@ export function TransparentBgIcon(props: SVGProps<SVGSVGElement>) {
   )
 }
 
+export function UserAvatarIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" {...props}>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19a4 4 0 00-8 0" />
+      <circle cx="11" cy="8" r="3" strokeWidth={2} />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 12a8 8 0 1016 0 8 8 0 10-16 0z" />
+    </svg>
+  )
+}
+
+export function BotAvatarIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" {...props}>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3h6" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v3" />
+      <rect x="5" y="7" width="14" height="10" rx="4" strokeWidth={2} />
+      <circle cx="10" cy="12" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14" cy="12" r="1" fill="currentColor" stroke="none" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.5 15h5" />
+    </svg>
+  )
+}
+
