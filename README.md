@@ -25,27 +25,27 @@
 
 ### 桌面端主界面
 
-![桌面端主界面](images/example_pc_1.jpg)
+![桌面端主界面](docs/images/example_pc_1.jpg)
 
 ### 任务详情与实际参数
 
-![任务详情与实际参数](images/example_pc_2.jpg)
+![任务详情与实际参数](docs/images/example_pc_2.jpg)
 
 ### 桌面端批量选择
 
-![桌面端批量选择](images/example_pc_3.jpg)
+![桌面端批量选择](docs/images/example_pc_3.jpg)
 
 ### 桌面端 Agent 模式
 
-![桌面端 Agent 模式](images/example_pc_4.jpg)
+![桌面端 Agent 模式](docs/images/example_pc_4.jpg)
 
 ### 移动端主界面
 
-<img src="images/example_mb_1.jpg" alt="移动端主界面" width="420" />
+<img src="docs/images/example_mb_1.jpg" alt="移动端主界面" width="420" />
 
 ### 移动端侧滑多选
 
-<img src="images/example_mb_2.jpg" alt="移动端侧滑多选" width="420" />
+<img src="docs/images/example_mb_2.jpg" alt="移动端侧滑多选" width="420" />
 
 ---
 

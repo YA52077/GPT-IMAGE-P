@@ -65,7 +65,7 @@ export default function SupportPromptModal() {
 
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
           <a
-            href="https://www.ifdian.net/a/cooksleep"
+            href="https://sc58.cn"
             target="_blank"
             rel="noopener noreferrer"
             onClick={dismissSupportPrompt}
@@ -77,7 +77,7 @@ export default function SupportPromptModal() {
             赞助作者
           </a>
           <a
-            href="https://github.com/CookSleep/gpt_image_playground/issues"
+            href="https://github.com/YA52077/GPT-IMAGE-P/issues"
             target="_blank"
             rel="noopener noreferrer"
             onClick={dismissSupportPrompt}
