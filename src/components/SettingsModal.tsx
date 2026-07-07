@@ -1549,9 +1549,17 @@ export default function SettingsModal() {
                     value={apiKeyInput}
                     onChange={(e) => {
                       setApiKeyInput(e.target.value)
-                      updateActiveProfile({ apiKey: e.target.value })
                     }}
-                    onBlur={(e) => commitActiveProfilePatch({ apiKey: e.target.value })}
+                    onBlur={(e) => {
+                      const nextValue = e.target.value.trim()
+                      if (!nextValue) {
+                        setApiKeyInput('')
+                        return
+                      }
+                      updateActiveProfile({ apiKey: nextValue })
+                      commitActiveProfilePatch({ apiKey: nextValue })
+                      setApiKeyInput('')
+                    }}
                     type="password"
                     placeholder={activeProfile.apiKey ? '已保存，输入新值可覆盖' : (activeProfile.provider === 'fal' ? 'FAL_KEY' : 'sk-...')}
                     autoComplete="new-password"

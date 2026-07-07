@@ -157,7 +157,7 @@ export default function Header() {
                     href="/"
                     
                     rel="noopener noreferrer"
-                    className="hidden text-lg font-bold tracking-tight text-gray-800 transition-colors hover:text-gray-600 dark:text-gray-100 dark:hover:text-gray-300 sm:inline"
+                    className="hidden text-lg font-bold tracking-tight text-[#18b8b1] transition-colors hover:text-[#0fa39d] dark:text-[#22d3c5] dark:hover:text-[#5eead4] sm:inline"
                   >
                     GPT绘图
                   </a>
@@ -167,7 +167,7 @@ export default function Header() {
                   href="/"
                 
                   rel="noopener noreferrer"
-                  className="text-[17px] sm:text-lg font-bold tracking-tight text-gray-800 dark:text-gray-100 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                  className="text-[17px] sm:text-lg font-bold tracking-tight text-[#18b8b1] dark:text-[#22d3c5] hover:text-[#0fa39d] dark:hover:text-[#5eead4] transition-colors"
                 >
                   GPT绘图
                 </a>
