@@ -15,9 +15,11 @@ import type {
   FavoriteCollection,
   ResponsesApiResponse,
   ResponsesOutputItem,
+  StoredImage,
+  StoredImageThumbnail,
 } from './types'
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_PARAMS } from './types'
-import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
+import { DEFAULT_SETTINGS, LEGACY_FAL_PROVIDER_ID, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
 import { dismissAllTooltips } from './lib/tooltipDismiss'
 import { remapImageMentionsForOrder, replaceImageMentionsForApi } from './lib/promptImageMentions'
 import {
@@ -33,7 +35,6 @@ import {
   getImageThumbnail,
   getStoredFreshImageThumbnail,
   getAllImageIds,
-  getAllImages,
   putImage,
   putImageThumbnail,
   deleteImage,
@@ -46,15 +47,15 @@ import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSin
 import { collectAgentRoundOutputImageSlots, extractAgentReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId, replaceAgentPromptImageReferencesForApi } from './lib/agentImageReferences'
 import { showBrowserNotification } from './lib/browserNotification'
 import { IMAGE_FETCH_CORS_HINT } from './lib/imageApiShared'
-import { getFalErrorMessage, getFalQueuedImageResult } from './lib/falAiImageApi'
 import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
 import { createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
+import { hasActiveDataOperations } from './lib/dataOperations'
 import { formatExportFileTime } from './lib/exportFileName'
-import { buildExportZip, readExportZip, readExportZipFileAsDataUrl } from './lib/exportZip'
+import { buildExportZip, createExportBlob, getExportImageEstimatedBytes, getExportZipPlan, MAX_EXPORT_ZIP_BYTES, readExportZip, readExportZipFileAsDataUrl, readExportZipManifest } from './lib/exportZip'
 
 export const ALL_FAVORITES_COLLECTION_ID = '__all_favorites__'
 export const DEFAULT_FAVORITE_COLLECTION_ID = '__default_favorites__'
@@ -72,12 +73,10 @@ let thumbnailBackfillScheduled = false
 const MAX_IMAGE_CACHE_ENTRIES = 8
 const MAX_THUMBNAIL_CACHE_ENTRIES = 80
 const MAX_THUMBNAIL_BACKFILL_CONCURRENT = 4
-const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
 const SUPPORT_PROMPT_IMAGE_THRESHOLD = 50
 const AGENT_INPUT_DRAFT_RETENTION_MS = 3 * 24 * 60 * 60 * 1000
 const AGENT_ROUND_IMAGE_MENTION_RE = /@(?:第)?(\d+)轮图(\d+)/g
-const falRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const customRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const openAIWatchdogTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const agentRoundControllers = new Map<string, AbortController>()
@@ -570,8 +569,56 @@ export function migratePersistedState(persistedState: unknown): unknown {
   if (!isRecord(persistedState)) return persistedState
   return {
     ...persistedState,
+    settings: normalizeSettings(persistedState.settings),
     agentConversations: stripPersistedAgentConversations(persistedState.agentConversations),
   }
+}
+
+const LEGACY_FAL_TASK_FIELDS = ['falRequestId', 'falEndpoint', 'falRecoverable'] as const
+const REMOVED_PROVIDER_TASK_ERROR = '任务使用的旧版服务商已被移除，无法继续恢复。'
+
+export function migrateLegacyProviderTasks(tasks: TaskRecord[], now = Date.now()) {
+  const changedTaskIds = new Set<string>()
+  const migratedTaskIds = new Set<string>()
+  const migratedTasks = tasks.map((task) => {
+    const raw = task as TaskRecord & Record<string, unknown>
+    const usesRemovedProvider = task.apiProvider === LEGACY_FAL_PROVIDER_ID
+    const wasRecoverable = raw[LEGACY_FAL_TASK_FIELDS[2]] === true
+    const hasLegacyFields = LEGACY_FAL_TASK_FIELDS.some((field) => field in raw)
+    if (!hasLegacyFields && !usesRemovedProvider) return task
+
+    changedTaskIds.add(task.id)
+    const migrated = { ...raw }
+    for (const field of LEGACY_FAL_TASK_FIELDS) delete migrated[field]
+    if (usesRemovedProvider) {
+      delete migrated.apiProvider
+      delete migrated.apiProfileId
+    }
+    if (usesRemovedProvider && (task.status === 'running' || wasRecoverable)) {
+      migratedTaskIds.add(task.id)
+      Object.assign(migrated, {
+        status: 'error',
+        error: REMOVED_PROVIDER_TASK_ERROR,
+        customRecoverable: false,
+        finishedAt: now,
+        elapsed: Math.max(0, now - task.createdAt),
+      })
+    }
+    return migrated as TaskRecord
+  })
+  return { tasks: migratedTasks, changedTaskIds, migratedTaskIds }
+}
+
+function terminateMigratedAgentRounds(conversations: AgentConversation[], migratedTaskIds: Set<string>, now = Date.now()) {
+  if (migratedTaskIds.size === 0) return conversations
+  return conversations.map((conversation) => ({
+    ...conversation,
+    rounds: conversation.rounds.map((round) =>
+      round.status === 'running' && round.outputTaskIds.some((taskId) => migratedTaskIds.has(taskId))
+        ? { ...round, status: 'error' as const, error: REMOVED_PROVIDER_TASK_ERROR, finishedAt: now }
+        : round,
+    ),
+  }))
 }
 
 function normalizeFavoriteCollectionName(value: string) {
@@ -1621,7 +1668,7 @@ export const useStore = create<AppState>()(
     }),
     {
       name: 'gpt-image-playground',
-      version: 2,
+      version: 3,
       migrate: (persistedState) => migratePersistedState(persistedState),
       partialize: getPersistedState,
       merge: mergePersistedState,
@@ -1696,12 +1743,8 @@ export function getCodexCliPromptKey(settings: AppSettings): string {
   return `${profile.baseUrl}\n${profile.apiKey}`
 }
 
-function isOpenAITask(task: TaskRecord) {
-  return (task.apiProvider ?? 'openai') !== 'fal'
-}
-
 function isRunningOpenAITask(task: TaskRecord) {
-  return task.status === 'running' && isOpenAITask(task)
+  return task.status === 'running'
 }
 
 function isAsyncCustomProviderTask(settings: AppSettings, provider: string, hasInputImages: boolean) {
@@ -1720,7 +1763,6 @@ export function markInterruptedOpenAIRunningTasks(tasks: TaskRecord[], now = Dat
       ...task,
       status: 'error',
       error: OPENAI_INTERRUPTED_ERROR,
-      falRecoverable: false,
       finishedAt: now,
       elapsed: Math.max(0, now - task.createdAt),
     }
@@ -1744,7 +1786,6 @@ function failOpenAITaskIfStillRunning(taskId: string, error: string, now = Date.
   updateTaskInStore(taskId, {
     status: 'error',
     error,
-    falRecoverable: false,
     finishedAt: now,
     elapsed: Math.max(0, now - task.createdAt),
   })
@@ -1814,15 +1855,9 @@ export function showCodexCliPrompt(force = false, reason = '接口返回的提�
   })
 }
 
-function getFalRecoveryProfile(settings: AppSettings, task: TaskRecord) {
-  const taskProfile = getTaskApiProfile(settings, task)
-  if (taskProfile?.provider === 'fal') return taskProfile
-  return null
-}
-
 function getCustomRecoveryProfile(settings: AppSettings, task: TaskRecord) {
   const provider = task.apiProvider
-  if (!provider || provider === 'openai' || provider === 'fal') return null
+  if (!provider || provider === 'openai') return null
   const taskProfile = getTaskApiProfile(settings, task)
   if (taskProfile?.provider === provider) return taskProfile
   return null
@@ -1943,21 +1978,6 @@ function getRawErrorPayload(err: unknown): Pick<Partial<TaskRecord>, 'rawImageUr
   }
 }
 
-function clearFalRecoveryTimer(taskId: string) {
-  const timer = falRecoveryTimers.get(taskId)
-  if (timer) clearTimeout(timer)
-  falRecoveryTimers.delete(taskId)
-}
-
-function scheduleFalRecovery(taskId: string, delayMs = FAL_RECOVERY_POLL_MS) {
-  if (falRecoveryTimers.has(taskId)) return
-  const timer = setTimeout(() => {
-    falRecoveryTimers.delete(taskId)
-    recoverFalTask(taskId)
-  }, delayMs)
-  falRecoveryTimers.set(taskId, timer)
-}
-
 function clearCustomRecoveryTimer(taskId: string) {
   const timer = customRecoveryTimers.get(taskId)
   if (timer) clearTimeout(timer)
@@ -2060,78 +2080,19 @@ async function resolveImageSizeParamsList(
   })
 }
 
-async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<ReturnType<typeof getFalQueuedImageResult>>) {
-  const latest = useStore.getState().tasks.find((item) => item.id === task.id)
-  if (!latest || latest.status === 'done' || latest.error === AGENT_STOPPED_MESSAGE) return
-  if (latest.status !== 'running' && !latest.falRecoverable) return
-
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds } = await storeTaskOutputImages(task, result.images)
-  const actualParamsList = await resolveImageSizeParamsList(outputDataUrls, result.actualParamsList, outputImageSizes)
-  const latestBeforeUpdate = useStore.getState().tasks.find((item) => item.id === task.id)
-  if (!latestBeforeUpdate || latestBeforeUpdate.status === 'done' || latestBeforeUpdate.error === AGENT_STOPPED_MESSAGE || (latestBeforeUpdate.status !== 'running' && !latestBeforeUpdate.falRecoverable)) {
-    await deleteUnreferencedImageIds([...outputIds, ...(transparentOriginalImageIds ?? [])])
-    return
-  }
-
-  updateTaskInStore(task.id, {
-    outputImages: outputIds,
-    transparentOriginalImages: transparentOriginalImageIds,
-    actualParams: firstActualParams(actualParamsList),
-    actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
-    revisedPromptByImage: undefined,
-    status: 'done',
-    error: null,
-    falRecoverable: false,
-    finishedAt: Date.now(),
-    elapsed: Date.now() - task.createdAt,
-  })
-  useStore.getState().showToast(`fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, 'success')
-  if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `fal.ai 任务已恢复，共 ${outputIds.length} 张图片。`)
-  else void continueRecoveredAgentRound(task.id)
-}
-
-async function recoverFalTask(taskId: string) {
-  const { settings, tasks } = useStore.getState()
-  const task = tasks.find((item) => item.id === taskId)
-  if (!task || task.apiProvider !== 'fal' || !task.falRequestId || !task.falEndpoint || task.status === 'done') return
-
-  const profile = getFalRecoveryProfile(settings, task)
-  if (!profile) {
-    scheduleFalRecovery(taskId)
-    return
-  }
-
-  try {
-    const result = await getFalQueuedImageResult(profile, task.falEndpoint, task.falRequestId, task.params)
-    clearFalRecoveryTimer(taskId)
-    await completeRecoveredFalTask(task, result)
-    return
-  } catch (err) {
-    if (isNetworkRecoverableError(err)) {
-      scheduleFalRecovery(taskId)
-      return
-    }
-
-    clearFalRecoveryTimer(taskId)
-    updateTaskInStore(taskId, {
-      status: 'error',
-      error: getFalErrorMessage(err) ?? (err instanceof Error ? err.message : String(err)),
-      ...getRawErrorPayload(err),
-      falRecoverable: false,
-      finishedAt: Date.now(),
-      elapsed: Date.now() - task.createdAt,
-    })
-    if (isAgentTask(task)) void continueRecoveredAgentRound(taskId)
-  }
-}
-
 /** 初始化：从 IndexedDB 加载任务，按需恢复输入图片，并清理孤立图片 */
 export async function initStore() {
-  const legacyAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)
-  const storedTasks = await getAllTasks()
-  const storedAgentConversations = normalizeAgentConversations(await getAllAgentConversations())
+  const now = Date.now()
+  const taskMigration = migrateLegacyProviderTasks(await getAllTasks(), now)
+  const storedTasks = taskMigration.tasks
+  const legacyAgentConversations = terminateMigratedAgentRounds(normalizeAgentConversations(useStore.getState().agentConversations), taskMigration.migratedTaskIds, now)
+  const storedAgentConversations = terminateMigratedAgentRounds(normalizeAgentConversations(await getAllAgentConversations()), taskMigration.migratedTaskIds, now)
   let loadedAgentConversations = mergeAgentConversationsForStorage(storedAgentConversations, legacyAgentConversations)
-  const currentAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)
+  const currentAgentConversations = terminateMigratedAgentRounds(
+    normalizeAgentConversations(useStore.getState().agentConversations),
+    taskMigration.migratedTaskIds,
+    now,
+  )
   loadedAgentConversations = mergeAgentConversationsForStorage(loadedAgentConversations, currentAgentConversations)
   const activeAgentConversationId = useStore.getState().activeAgentConversationId && loadedAgentConversations.some((conversation) => conversation.id === useStore.getState().activeAgentConversationId)
     ? useStore.getState().activeAgentConversationId
@@ -2164,7 +2125,10 @@ export async function initStore() {
     useStore.setState({})
   }
   const { tasks: markedTasks, interruptedTasks } = markInterruptedOpenAIRunningTasks(storedTasks)
-  const interruptedTaskIds = new Set(interruptedTasks.map((task) => task.id))
+  const interruptedTaskIds = new Set([
+    ...interruptedTasks.map((task) => task.id),
+    ...taskMigration.changedTaskIds,
+  ])
   const favoriteState = useStore.getState()
   const normalizedFavorites = normalizeLoadedFavoriteState(markedTasks.map(getPersistableTask), favoriteState.favoriteCollections, favoriteState.defaultFavoriteCollectionId)
   const tasks = normalizedFavorites.tasks
@@ -2180,14 +2144,6 @@ export async function initStore() {
   useStore.getState().setTasks(tasks)
   showSupportPromptForExistingLocalData(tasks)
   for (const task of tasks) {
-    if (
-      task.apiProvider === 'fal' &&
-      task.falRequestId &&
-      task.falEndpoint &&
-      (task.status === 'running' || task.falRecoverable)
-    ) {
-      scheduleFalRecovery(task.id, 0)
-    }
     if (
       task.customTaskId &&
       (task.status === 'running' || task.customRecoverable)
@@ -2503,18 +2459,16 @@ function appendAgentStoppedMessage(content: string) {
 
 function markAgentRoundTasksStopped(conversationId: string, roundId: string, now = Date.now()) {
   const runningTasks = useStore.getState().tasks.filter((task) =>
-    (task.status === 'running' || task.falRecoverable || task.customRecoverable) &&
+    (task.status === 'running' || task.customRecoverable) &&
     task.agentConversationId === conversationId &&
     task.agentRoundId === roundId,
   )
 
   for (const task of runningTasks) {
-    clearFalRecoveryTimer(task.id)
     clearCustomRecoveryTimer(task.id)
     updateTaskInStore(task.id, {
       status: 'error',
       error: AGENT_STOPPED_MESSAGE,
-      falRecoverable: false,
       customRecoverable: false,
       finishedAt: now,
       elapsed: Math.max(0, now - task.createdAt),
@@ -2544,7 +2498,6 @@ function markAgentRoundTasksFailed(
       status: 'error',
       error,
       ...(rawResponsePayload ? { rawResponsePayload } : {}),
-      falRecoverable: false,
       customRecoverable: false,
       finishedAt: now,
       elapsed: Math.max(0, now - task.createdAt),
@@ -3300,7 +3253,7 @@ function createAgentRecoveredToolOutputs(round: AgentRound, tasks: TaskRecord[])
         }
       })()
       const task = tasks.find((task) => task.agentRoundId === round.id && task.agentToolCallId === item.call_id)
-      if (!task || task.status === 'running' || task.falRecoverable || task.customRecoverable) {
+      if (!task || task.status === 'running' || task.customRecoverable) {
         hasPendingRecoverableCall = true
         continue
       }
@@ -3327,7 +3280,7 @@ function createAgentRecoveredToolOutputs(round: AgentRound, tasks: TaskRecord[])
       const batchTasks = round.outputTaskIds
         .map((taskId) => tasks.find((task) => task.id === taskId))
         .filter((task): task is TaskRecord => Boolean(task && task.agentBatchCallId === item.call_id))
-      if (batchTasks.length < batchItems.length || batchTasks.some((task) => task.status === 'running' || task.falRecoverable || task.customRecoverable)) {
+      if (batchTasks.length < batchItems.length || batchTasks.some((task) => task.status === 'running' || task.customRecoverable)) {
         hasPendingRecoverableCall = true
         continue
       }
@@ -3372,7 +3325,7 @@ function createReadyAgentRecoveredToolState(round: AgentRound, tasks: TaskRecord
   const roundTasks = round.outputTaskIds
     .map((taskId) => tasks.find((task) => task.id === taskId))
     .filter((task): task is TaskRecord => Boolean(task))
-  if (roundTasks.length === 0 || roundTasks.some((task) => task.status === 'running' || task.falRecoverable || task.customRecoverable)) return null
+  if (roundTasks.length === 0 || roundTasks.some((task) => task.status === 'running' || task.customRecoverable)) return null
 
   return {
     additions: [] as ResponsesOutputItem[],
@@ -3417,7 +3370,7 @@ function getAgentRecoveredToolCallCount(output: ResponsesOutputItem[], tasks: Ta
 function getAgentRecoveredFailureError(round: AgentRound, tasks: TaskRecord[]) {
   const failedTasks = round.outputTaskIds
     .map((taskId) => tasks.find((item) => item.id === taskId))
-    .filter((task): task is TaskRecord => Boolean(task && task.status === 'error' && !task.falRecoverable && !task.customRecoverable))
+    .filter((task): task is TaskRecord => Boolean(task && task.status === 'error' && !task.customRecoverable))
 
   if (failedTasks.length === 0) return '图像生成失败'
   if (failedTasks.length === 1) return failedTasks[0].error || '图像生成失败'
@@ -3914,7 +3867,6 @@ async function executeAgentRound(
         status: 'error',
         error,
         rawResponsePayload,
-        falRecoverable: false,
         customRecoverable: false,
         finishedAt: Date.now(),
         elapsed: Date.now() - latestTask.createdAt,
@@ -3926,19 +3878,6 @@ async function executeAgentRound(
       if (!taskId || !isNetworkRecoverableError(err)) return false
       const latestTask = useStore.getState().tasks.find((task) => task.id === taskId)
       if (!latestTask || latestTask.status !== 'running') return false
-
-      if (latestTask.apiProvider === 'fal' && latestTask.falRequestId && latestTask.falEndpoint) {
-        useStore.getState().setTaskStreamPreview(taskId)
-        updateTaskInStore(taskId, {
-          status: 'error',
-          error: '与 fal.ai 的连接已断开，之后会继续查询任务结果。',
-          falRecoverable: true,
-          finishedAt: Date.now(),
-          elapsed: Date.now() - latestTask.createdAt,
-        })
-        scheduleFalRecovery(taskId)
-        return true
-      }
 
       if (latestTask.customTaskId) {
         useStore.getState().setTaskStreamPreview(taskId)
@@ -4062,13 +4001,6 @@ async function executeAgentRound(
               void opts.onPartialImage?.({ image: partial.image, partialImageIndex: partial.partialImageIndex ?? partial.requestIndex })
             }
           : undefined,
-        onFalRequestEnqueued: (request) => {
-          updateTaskInStore(opts.taskId, {
-            falRequestId: request.requestId,
-            falEndpoint: request.endpoint,
-            falRecoverable: false,
-          })
-        },
         onCustomTaskEnqueued: (request) => {
           updateTaskInStore(opts.taskId, {
             customTaskId: request.taskId,
@@ -4658,12 +4590,22 @@ async function executeTask(taskId: string) {
   const { settings } = useStore.getState()
   const task = useStore.getState().tasks.find((t) => t.id === taskId)
   if (!task) return
+  if (task.apiProvider === LEGACY_FAL_PROVIDER_ID) {
+    const migrated = migrateLegacyProviderTasks([task]).tasks[0]
+    updateTaskInStore(taskId, {
+      status: 'error',
+      error: migrated.error ?? REMOVED_PROVIDER_TASK_ERROR,
+      customRecoverable: false,
+      finishedAt: migrated.finishedAt ?? Date.now(),
+      elapsed: migrated.elapsed ?? Math.max(0, Date.now() - task.createdAt),
+    })
+    return
+  }
   const taskProfile = getTaskApiProfile(settings, task)
   if (!taskProfile && task.apiProfileId) {
     updateTaskInStore(taskId, {
       status: 'error',
       error: '找不到此任务所使用的 API 配置。',
-      falRecoverable: false,
       customRecoverable: false,
       finishedAt: Date.now(),
       elapsed: Date.now() - task.createdAt,
@@ -4673,15 +4615,11 @@ async function executeTask(taskId: string) {
   const activeProfile = taskProfile ?? getActiveApiProfile(settings)
   const requestSettings = createSettingsForApiProfile(settings, activeProfile)
   const taskProvider = task.apiProvider ?? activeProfile.provider
-  let falRequestInfo: { requestId: string; endpoint: string } | null = task.falRequestId && task.falEndpoint
-        ? { requestId: task.falRequestId, endpoint: task.falEndpoint }
-    : null
   let customTaskInfo: { taskId: string } | null = task.customTaskId
     ? { taskId: task.customTaskId }
     : null
 
   if (
-    taskProvider !== 'fal' &&
     !isAsyncCustomProviderTask(requestSettings, taskProvider, task.inputImageIds.length > 0) &&
     !usesConcurrentOpenAIImageRequests(activeProfile, task.params)
   ) {
@@ -4712,14 +4650,6 @@ async function executeTask(taskId: string) {
       params: task.params,
       inputImageDataUrls: inputDataUrls,
       maskDataUrl,
-      onFalRequestEnqueued: (request) => {
-        falRequestInfo = request
-        updateTaskInStore(taskId, {
-          falRequestId: request.requestId,
-          falEndpoint: request.endpoint,
-          falRecoverable: false,
-        })
-      },
       onCustomTaskEnqueued: (request) => {
         customTaskInfo = request
         updateTaskInStore(taskId, {
@@ -4741,14 +4671,13 @@ async function executeTask(taskId: string) {
 
     // 存储输出图片
     const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds } = await storeTaskOutputImages(task, result.images)
-    const isAsyncCustomTask = taskProvider !== 'fal' && taskProvider !== 'openai' && Boolean(customTaskInfo)
+    const isAsyncCustomTask = taskProvider !== 'openai' && Boolean(customTaskInfo)
     const actualParamsList = await resolveImageSizeParamsList(
       outputDataUrls,
       isAsyncCustomTask ? undefined : result.actualParamsList,
       outputImageSizes,
     )
     const actualParams = (() => {
-      if (taskProvider === 'fal') return firstActualParams(actualParamsList)
       if (isAsyncCustomTask) return firstActualParams(actualParamsList)
       const firstParams = firstActualParams(actualParamsList)
       return {
@@ -4757,7 +4686,7 @@ async function executeTask(taskId: string) {
         n: outputIds.length,
       }
     })()
-    const shouldStoreRevisedPrompts = taskProvider !== 'fal' && !isAsyncCustomTask
+    const shouldStoreRevisedPrompts = !isAsyncCustomTask
     const actualParamsByImage = mapActualParamsByImage(outputIds, actualParamsList)
     const revisedPromptByImage = shouldStoreRevisedPrompts ? result.revisedPrompts?.reduce<Record<string, string>>((acc, revisedPrompt, index) => {
       const imgId = outputIds[index]
@@ -4797,7 +4726,6 @@ async function executeTask(taskId: string) {
       status: 'done',
       finishedAt: Date.now(),
       elapsed: Date.now() - task.createdAt,
-      falRecoverable: false,
       customRecoverable: false,
     })
     void deleteUnreferencedImageIds(partialImageIdsToClean)
@@ -4822,22 +4750,8 @@ async function executeTask(taskId: string) {
     const latestTask = useStore.getState().tasks.find((t) => t.id === taskId) ?? task
     if (latestTask.status !== 'running') return
     useStore.getState().setTaskStreamPreview(taskId)
-    const latestFalRequestInfo = falRequestInfo ?? (latestTask.falRequestId && latestTask.falEndpoint
-      ? { requestId: latestTask.falRequestId, endpoint: latestTask.falEndpoint }
-      : null)
     const latestCustomTaskInfo = customTaskInfo ?? (latestTask.customTaskId ? { taskId: latestTask.customTaskId } : null)
-    if (latestTask.apiProvider === 'fal' && latestFalRequestInfo && isNetworkRecoverableError(err)) {
-      updateTaskInStore(taskId, {
-        status: 'error',
-        error: '与 fal.ai 的连接已断开，之后会继续查询任务结果。',
-        falRequestId: latestFalRequestInfo.requestId,
-        falEndpoint: latestFalRequestInfo.endpoint,
-        falRecoverable: true,
-        finishedAt: Date.now(),
-        elapsed: Date.now() - task.createdAt,
-      })
-      scheduleFalRecovery(taskId)
-    } else if (latestCustomTaskInfo && isNetworkRecoverableError(err)) {
+    if (latestCustomTaskInfo && isNetworkRecoverableError(err)) {
       updateTaskInStore(taskId, {
         status: 'error',
         error: '与自定义异步任务的连接已断开，之后会继续查询任务结果。',
@@ -4867,7 +4781,6 @@ async function executeTask(taskId: string) {
         status: 'error',
         error: errorMessage,
         ...getRawErrorPayload(err),
-        falRecoverable: false,
         customRecoverable: false,
         finishedAt: Date.now(),
         elapsed: Date.now() - task.createdAt,
@@ -5411,53 +5324,77 @@ export interface ExportOptions {
 /** 导出数据为 ZIP */
 export async function exportData(options: ExportOptions = { exportConfig: true, exportTasks: true }) {
   try {
+    const state = useStore.getState()
+    if (options.exportTasks && hasActiveDataOperations(state.tasks, state.agentConversations)) throw new Error('当前有任务正在进行，请完成或停止后再导出。')
     const tasks = options.exportTasks ? await getAllTasks() : []
-    const images = options.exportTasks ? await getAllImages() : []
-    const { settings, agentConversations, favoriteCollections, defaultFavoriteCollectionId } = useStore.getState()
+    const imageIds = options.exportTasks ? await getAllImageIds() : []
+    const { settings, agentConversations, favoriteCollections, defaultFavoriteCollectionId } = state
     const exportedAt = Date.now()
-    const thumbnailsByImageId = new Map<string, NonNullable<Awaited<ReturnType<typeof getImageThumbnail>>>>()
-
-    if (options.exportTasks) {
-      for (const img of images) {
-        const thumbnail = await getImageThumbnail(img.id)
-        if (thumbnail?.thumbnailDataUrl) {
-          thumbnailsByImageId.set(img.id, thumbnail)
-          cacheThumbnail(img.id, {
-            dataUrl: thumbnail.thumbnailDataUrl,
-            width: thumbnail.width,
-            height: thumbnail.height,
-            thumbnailVersion: thumbnail.thumbnailVersion,
-          })
-        }
-      }
-    }
-
-    const { bytes: zipped } = buildExportZip({
+    const params = {
       options,
       exportedAt,
       settings,
       tasks,
-      images,
-      thumbnailsByImageId,
+      imageTasks: tasks,
       favoriteCollections,
       defaultFavoriteCollectionId,
-      agentConversations: getPersistableAgentConversations(agentConversations),
-    })
-    const blob = new Blob([zipped.buffer as ArrayBuffer], { type: 'application/zip' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `gpt-image-playground-backup_${formatExportFileTime(new Date(exportedAt))}.zip`
-    a.click()
-    URL.revokeObjectURL(url)
-    useStore.getState().showToast('数据已导出', 'success')
+      agentConversations: options.exportTasks ? getPersistableAgentConversations(agentConversations) : [],
+    }
+    const imageSizes = []
+    for (const id of imageIds) {
+      const image = await getImage(id)
+      if (!image) continue
+      const thumbnail = await getImageThumbnail(id)
+      imageSizes.push({ id, bytes: getExportImageEstimatedBytes(image, thumbnail) })
+    }
+    const plan = getExportZipPlan(params, imageSizes)
+    const backupId = `${exportedAt}`
+
+    for (let index = 0; index < plan.length; index++) {
+      const images: StoredImage[] = []
+      const thumbnailsByImageId = new Map<string, StoredImageThumbnail>()
+      for (const id of plan[index].imageIds) {
+        const image = await getImage(id)
+        if (!image) continue
+        images.push(image)
+        const thumbnail = await getImageThumbnail(id)
+        if (!thumbnail?.thumbnailDataUrl) continue
+        thumbnailsByImageId.set(id, thumbnail)
+        cacheThumbnail(id, {
+          dataUrl: thumbnail.thumbnailDataUrl,
+          width: thumbnail.width,
+          height: thumbnail.height,
+          thumbnailVersion: thumbnail.thumbnailVersion,
+        })
+      }
+
+      const partNumber = index + 1
+      const result = await buildExportZip({
+        ...params,
+        tasks: plan[index].tasks,
+        agentConversations: plan[index].agentConversations,
+        images,
+        thumbnailsByImageId,
+        includeManifestData: plan[index].includeBaseData,
+        backupPart: plan.length > 1 ? { id: backupId, index: partNumber, total: plan.length } : undefined,
+      })
+      const blob = createExportBlob(result.bytes)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const suffix = plan.length > 1 ? `_${String(plan.length).padStart(2, '0')}parts_part${String(partNumber).padStart(2, '0')}` : ''
+      a.href = url
+      a.download = `gpt-image-playground-backup_${formatExportFileTime(new Date(exportedAt))}${suffix}.zip`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      if (partNumber < plan.length) await new Promise((resolve) => setTimeout(resolve, 150))
+    }
+    useStore.getState().showToast(plan.length > 1 ? `已请求下载 ${plan.length} 个 ZIP，请确认浏览器已允许多文件下载` : '数据已导出', 'success')
   } catch (e) {
-    useStore
-      .getState()
-      .showToast(
-        `导出失败：${e instanceof Error ? e.message : String(e)}`,
-        'error',
-      )
+    console.error('exportData failed', e)
+    const detail = e instanceof Error ? e.message.trim() : String(e).trim()
+    useStore.getState().showToast(detail ? `导出失败，${detail}` : '导出失败，未知错误', 'error')
   }
 }
 
@@ -5468,48 +5405,88 @@ export interface ImportOptions {
 }
 
 /** 导入 ZIP 数据 */
-export async function importData(file: File, options: ImportOptions = { importConfig: true, importTasks: true }): Promise<boolean> {
+export async function importData(input: File | File[], options: ImportOptions = { importConfig: true, importTasks: true }): Promise<boolean> {
   try {
-    const buffer = await file.arrayBuffer()
-    const { manifest: data, files } = readExportZip(new Uint8Array(buffer))
+    const state = useStore.getState()
+    if (options.importTasks && hasActiveDataOperations(state.tasks, state.agentConversations)) throw new Error('当前有任务正在进行，请完成或停止后再导入。')
+    const files = Array.isArray(input) ? input : [input]
+    if (!files.length) throw new Error('没有选择备份文件。')
+    if (files.some((file) => file.size >= MAX_EXPORT_ZIP_BYTES)) {
+      throw new Error('单个 ZIP 不能达到或超过 2 GB，请选择分片备份。')
+    }
+
+    const selected = [] as Array<{ file: File; manifest: Awaited<ReturnType<typeof readExportZipManifest>> }>
+    for (const file of files) {
+      const manifest = await readExportZipManifest(new Uint8Array(await file.arrayBuffer()), options.importTasks)
+      selected.push({ file, manifest })
+    }
+    const multipart = selected.some((part) => part.manifest.backupPart != null)
+    if (multipart) {
+      if (selected.some((part) => !part.manifest.backupPart)) throw new Error('不能混合选择分片备份和普通备份。')
+      const first = selected[0].manifest.backupPart!
+      const indexes = new Set(selected.map((part) => part.manifest.backupPart!.index))
+      const validSet = selected.every((part) => {
+        const backupPart = part.manifest.backupPart!
+        return backupPart.id === first.id && backupPart.total === first.total && backupPart.index >= 1 && backupPart.index <= first.total
+      })
+      if (!validSet || indexes.size !== selected.length) throw new Error('所选分片不属于同一批备份或包含重复分片。')
+      if (options.importTasks && (selected.length !== first.total || indexes.size !== first.total)) {
+        throw new Error(`分片备份不完整，请一次选择同一备份的全部 ${first.total} 个 ZIP。`)
+      }
+      selected.sort((a, b) => a.manifest.backupPart!.index - b.manifest.backupPart!.index)
+    } else if (selected.length > 1) {
+      throw new Error('多个普通备份不能同时导入，请每次选择一个 ZIP。')
+    }
+
+    const data = selected.find((part) => part.manifest.settings)?.manifest ?? selected[0].manifest
+    if (options.importConfig && !options.importTasks && !data.settings) throw new Error('所选分片不包含配置数据。')
+    const importedTaskMigration = migrateLegacyProviderTasks(selected.flatMap((part) => part.manifest.tasks ?? []))
+    const importedTasks = importedTaskMigration.tasks
+    const importedAgentConversations = terminateMigratedAgentRounds(
+      normalizeAgentConversations(selected.flatMap((part) => part.manifest.agentConversations ?? [])),
+      importedTaskMigration.migratedTaskIds,
+    )
+    const hasTaskData = selected.some((part) => part.manifest.tasks != null || part.manifest.imageFiles != null)
 
     const importedImageIds: string[] = []
-    if (options.importTasks && data.tasks && data.imageFiles) {
-      // 还原图片
-      for (const [id, info] of Object.entries(data.imageFiles)) {
-        const dataUrl = readExportZipFileAsDataUrl(files, info.path)
-        if (!dataUrl) continue
-        await putImage({
-          id,
-          dataUrl,
-          createdAt: info.createdAt,
-          source: info.source,
-          width: info.width,
-          height: info.height,
-        })
-        cacheImage(id, dataUrl)
-        importedImageIds.push(id)
+    if (options.importTasks && hasTaskData) {
+      for (const part of selected) {
+        const { manifest, files: zipFiles } = await readExportZip(new Uint8Array(await part.file.arrayBuffer()))
+        for (const [id, info] of Object.entries(manifest.imageFiles ?? {})) {
+          const dataUrl = readExportZipFileAsDataUrl(zipFiles, info.path)
+          if (!dataUrl) continue
+          await putImage({
+            id,
+            dataUrl,
+            createdAt: info.createdAt,
+            source: info.source,
+            width: info.width,
+            height: info.height,
+          })
+          cacheImage(id, dataUrl)
+          importedImageIds.push(id)
+        }
+
+        for (const [id, info] of Object.entries(manifest.thumbnailFiles ?? {})) {
+          const thumbnailDataUrl = readExportZipFileAsDataUrl(zipFiles, info.path)
+          if (!thumbnailDataUrl) continue
+          await putImageThumbnail({
+            id,
+            thumbnailDataUrl,
+            width: info.width,
+            height: info.height,
+            thumbnailVersion: info.thumbnailVersion,
+          })
+          cacheThumbnail(id, {
+            dataUrl: thumbnailDataUrl,
+            width: info.width,
+            height: info.height,
+            thumbnailVersion: info.thumbnailVersion,
+          })
+        }
       }
 
-      for (const [id, info] of Object.entries(data.thumbnailFiles ?? {})) {
-        const thumbnailDataUrl = readExportZipFileAsDataUrl(files, info.path)
-        if (!thumbnailDataUrl) continue
-        await putImageThumbnail({
-          id,
-          thumbnailDataUrl,
-          width: info.width,
-          height: info.height,
-          thumbnailVersion: info.thumbnailVersion,
-        })
-        cacheThumbnail(id, {
-          dataUrl: thumbnailDataUrl,
-          width: info.width,
-          height: info.height,
-          thumbnailVersion: info.thumbnailVersion,
-        })
-      }
-
-      for (const task of data.tasks) {
+      for (const task of importedTasks) {
         await putTask(task)
       }
 
@@ -5529,13 +5506,13 @@ export async function importData(file: File, options: ImportOptions = { importCo
         defaultFavoriteCollectionId: normalizedFavorites.defaultFavoriteCollectionId,
       })
       if (normalizedFavorites.changed) await Promise.all(normalizedFavorites.tasks.map((task) => putTask(task)))
-      const importedAgentConversations = normalizeAgentConversations(data.agentConversations)
+      const normalizedAgentConversations = normalizeAgentConversations(importedAgentConversations)
         .filter((conversation) => !isEmptyAgentConversation(conversation))
       useStore.setState((state) => {
-        const agentConversations = mergeImportedAgentConversations(state.agentConversations, importedAgentConversations)
+        const agentConversations = mergeImportedAgentConversations(state.agentConversations, normalizedAgentConversations)
         const activeAgentConversationId = state.activeAgentConversationId && agentConversations.some((conversation) => conversation.id === state.activeAgentConversationId)
           ? state.activeAgentConversationId
-          : importedAgentConversations[0]?.id ?? agentConversations[0]?.id ?? null
+          : normalizedAgentConversations[0]?.id ?? agentConversations[0]?.id ?? null
         return {
           agentConversations,
           activeAgentConversationId,
@@ -5552,8 +5529,8 @@ export async function importData(file: File, options: ImportOptions = { importCo
     }
 
     let msg = '数据已成功导入'
-    if (options.importTasks && data.tasks) {
-      msg = `已导入 ${data.tasks.length} 个任务`
+    if (options.importTasks && hasTaskData) {
+      msg = `已导入 ${importedTasks.length} 个任务`
     } else if (options.importConfig && data.settings) {
       msg = '配置已成功导入'
     }
@@ -5561,12 +5538,9 @@ export async function importData(file: File, options: ImportOptions = { importCo
     useStore.getState().showToast(msg, 'success')
     return true
   } catch (e) {
-    useStore
-      .getState()
-      .showToast(
-        `导入失败：${e instanceof Error ? e.message : String(e)}`,
-        'error',
-      )
+    console.error('importData failed', e)
+    const detail = e instanceof Error ? e.message.trim() : String(e).trim()
+    useStore.getState().showToast(detail ? `导入失败，${detail}` : '导入失败，未知错误', 'error')
     return false
   }
 }

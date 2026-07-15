@@ -3,7 +3,7 @@ import type { TaskRecord } from '../types'
 import { useStore, ensureImageThumbnailCached, subscribeImageThumbnail, retryTask } from '../store'
 import { formatImageRatio } from '../lib/size'
 import { getParamDisplay, ActualValueBadge } from '../lib/paramDisplay'
-import { DEFAULT_IMAGES_MODEL, DEFAULT_FAL_MODEL } from '../lib/apiProfiles'
+import { DEFAULT_IMAGES_MODEL } from '../lib/apiProfiles'
 import { isAgentTaskPromptPending } from '../lib/taskPromptDisplay'
 import { CodeIcon, TransparentBgIcon } from './icons'
 import ViewportTooltip from './ViewportTooltip'
@@ -239,11 +239,11 @@ export default function TaskCard({
 
   // 定时更新运行中任务的计时
   useEffect(() => {
-    if (task.status !== 'running' && !(task.status === 'error' && (task.falRecoverable || task.customRecoverable))) return
+    if (task.status !== 'running' && !(task.status === 'error' && task.customRecoverable)) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     setNow(Date.now())
     return () => clearInterval(id)
-  }, [task.customRecoverable, task.falRecoverable, task.status])
+  }, [task.customRecoverable, task.status])
 
   // 加载缩略图
   useEffect(() => {
@@ -282,7 +282,7 @@ export default function TaskCard({
 
   const duration = (() => {
     let seconds: number
-    if (task.status === 'running' || task.falRecoverable || task.customRecoverable) {
+    if (task.status === 'running' || task.customRecoverable) {
       seconds = Math.floor((now - task.createdAt) / 1000)
     } else if (task.elapsed != null) {
       seconds = Math.floor(task.elapsed / 1000)
@@ -294,9 +294,8 @@ export default function TaskCard({
     return `${mm}:${ss}`
   })()
   const showSwipeAction = swipeActionActive
-  const isFalReconnecting = task.status === 'error' && task.falRecoverable
   const isCustomReconnecting = task.status === 'error' && task.customRecoverable
-  const showRunningTimer = task.status === 'running' || isFalReconnecting || isCustomReconnecting
+  const showRunningTimer = task.status === 'running' || isCustomReconnecting
   const swipeBgClass = showSwipeAction
     ? swipeStartedSelected
       ? 'bg-gray-500 dark:bg-gray-600'
@@ -322,8 +321,7 @@ export default function TaskCard({
   const requestedOutputCount = Math.max(task.params.n, outputSuccessCount + outputErrorCount)
   const hasPartialOutputFailure = task.status === 'done' && outputErrorCount > 0
 
-  const defaultModelForProvider = task.apiProvider === 'fal' ? DEFAULT_FAL_MODEL : DEFAULT_IMAGES_MODEL
-  const showModel = task.apiModel && task.apiModel !== defaultModelForProvider
+  const showModel = task.apiModel && task.apiModel !== DEFAULT_IMAGES_MODEL
   const isInterrupted = task.status === 'error' && task.error === '已停止生成。'
 
   return (
@@ -441,7 +439,7 @@ export default function TaskCard({
               <span className="text-xs text-gray-400 dark:text-gray-500">生成中...</span>
             </div>
           )}
-          {task.status === 'error' && isFalReconnecting && (
+          {task.status === 'error' && isCustomReconnecting && (
             <div className="flex flex-col items-center gap-1 px-2">
               <svg
                 className="w-7 h-7 text-yellow-400"
@@ -461,7 +459,7 @@ export default function TaskCard({
               </span>
             </div>
           )}
-          {task.status === 'error' && !isFalReconnecting && (
+          {task.status === 'error' && !isCustomReconnecting && (
             <div className="flex flex-col items-center gap-1 px-2">
               <svg
                 className={`w-7 h-7 ${isInterrupted ? 'text-yellow-400' : 'text-red-400'}`}
@@ -637,7 +635,7 @@ export default function TaskCard({
               onTouchEnd={(e) => e.stopPropagation()}
               onTouchCancel={(e) => e.stopPropagation()}
             >
-              {((task.status === 'error' && !isFalReconnecting) || settings.alwaysShowRetryButton) && (
+              {((task.status === 'error' && !isCustomReconnecting) || settings.alwaysShowRetryButton) && (
                 <TaskActionButton
                   tooltip="重试任务"
                   onClick={() => retryTask(task)}

@@ -2,13 +2,13 @@
 
 # GPT绘图
 
-[![在线体验](https://img.shields.io/badge/在线体验-dra.48nh.com-18b8b1?style=for-the-badge)](https://dra.48nh.com)
+[![在线体验](https://img.shields.io/badge/在线体验-gtp.48nh.com-18b8b1?style=for-the-badge)](https://gtp.48nh.com)
 
 </div>
 
 ## 本次更新说明
 
-- 新增在线体验地址：<https://dra.48nh.com>
+- 新增在线体验地址：<https://gtp.48nh.com>
 - 顶部项目标题颜色已调整为接近参考图的青绿色风格
 - Agent 对话区已接入固定头像资源：
   - 用户头像：`public/avatars/user.jpg`
@@ -24,7 +24,7 @@
 ## 项目简介
 
 `GPT绘图`（仓库名：`GPT-IMAGE-P`）是一个基于 **React + Vite + TypeScript** 构建的前端图片生成与编辑应用，面向 OpenAI
-`gpt-image`、OpenAI 兼容接口、fal.ai 以及可导入的自定义 HTTP 图片服务商。
+`gpt-image`、OpenAI 兼容接口以及可导入的自定义 HTTP 图片服务商。
 
 项目目标不是只做一个简单的调用面板，而是提供一个适合长期使用的本地化图片工作台，重点覆盖以下场景：
 
@@ -75,7 +75,6 @@
 ### 图片生成与编辑
 
 - 支持 OpenAI 兼容的 `Images API` 与 `Responses API`
-- 支持 fal.ai 队列式生图
 - 支持参考图输入、最多多张图片联合生成
 - 支持遮罩编辑与局部重绘
 - 支持批量生成与失败槽位提示
@@ -100,7 +99,7 @@
 
 ### 服务商与配置管理
 
-- 内置 OpenAI 兼容接口与 fal.ai
+- 内置 OpenAI 兼容接口
 - 支持导入自定义 HTTP 服务商描述
 - 支持同步型与异步轮询型自定义服务商
 - 支持独立的 Agent 文本模型 / 图片模型配置
@@ -219,7 +218,6 @@ deploy/
 它会根据当前激活的 API 配置自动分发到不同实现：
 
 - `src/lib/openaiCompatibleImageApi.ts`：OpenAI 兼容接口 / 自定义服务商
-- `src/lib/falAiImageApi.ts`：fal.ai
 - `src/lib/agentApi.ts`：Agent 模式下的 Responses API 与工具编排
 
 相关配置与兼容逻辑集中在 `src/lib/apiProfiles.ts`，主要负责：
@@ -292,7 +290,7 @@ deploy/
 1. 用户在 `InputBar` 中输入提示词、上传参考图、选择参数
 2. 提交动作进入 `store.ts` 的任务提交逻辑
 3. `store.ts` 调用 `callImageApi()`
-4. API 层根据 profile 分发到 OpenAI / fal / 自定义服务商
+4. API 层根据 profile 分发到 OpenAI / 自定义服务商
 5. 返回的图片被存入 IndexedDB，并建立任务记录
 6. `TaskGrid` 根据状态刷新展示
 7. 用户可继续收藏、查看详情、下载、删除或二次编辑

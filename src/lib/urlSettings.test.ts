@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  createDefaultFalProfile,
   createDefaultOpenAIProfile,
   DEFAULT_IMAGES_MODEL,
   DEFAULT_SETTINGS,
@@ -178,24 +177,40 @@ describe('URL settings params', () => {
     })
   })
 
-  it('creates an OpenAI profile from legacy params even when fal is active', () => {
-    const falProfile = createDefaultFalProfile({ id: 'fal-active', apiKey: 'fal-key' })
-    const current = normalizeSettings({
-      ...DEFAULT_SETTINGS,
-      profiles: [falProfile],
-      activeProfileId: falProfile.id,
-    })
+  it('filters removed provider profiles from settings URL payloads before activation', () => {
+    const importedSettings = {
+      profiles: [{
+        id: 'legacy-fal',
+        name: 'Legacy',
+        provider: 'fal',
+        baseUrl: 'https://fal.run',
+        apiKey: 'FAL_SECRET',
+        model: 'openai/gpt-image-2',
+        timeout: 300,
+        apiMode: 'images',
+        codexCli: false,
+        apiProxy: false,
+      }, createDefaultOpenAIProfile({
+        id: 'url-openai',
+        baseUrl: 'https://api.example.com/v1',
+        apiKey: 'openai-key',
+      })],
+      activeProfileId: 'legacy-fal',
+    }
+    const params = new URLSearchParams({ settings: JSON.stringify(importedSettings) })
     const next = normalizeSettings({
-      ...current,
-      ...buildSettingsFromUrlParams(current, new URLSearchParams('apiUrl=https://api.example.com/v1&apiKey=openai-key')),
+      ...DEFAULT_SETTINGS,
+      ...buildSettingsFromUrlParams(DEFAULT_SETTINGS, params),
     })
 
-    expect(next.profiles).toHaveLength(2)
-    expect(next.profiles.find((profile) => profile.id === next.activeProfileId)).toMatchObject({
+    expect(next.profiles).toEqual([expect.objectContaining({
+      id: 'url-openai',
       provider: 'openai',
       baseUrl: 'https://api.example.com/v1',
       apiKey: 'openai-key',
-    })
+    })])
+    expect(JSON.stringify(next)).not.toContain('FAL_SECRET')
+    expect(JSON.stringify(next)).not.toContain('https://fal.run')
   })
 
   it('clears known URL setting params without touching unrelated params', () => {
